@@ -1,13 +1,24 @@
 import http from 'node:http';
+import { context, SpanStatusCode, trace } from '@opentelemetry/api';
 import { atualizarStatusPedido } from '../db/consultas';
 import { esperarBanco, fecharPool } from '../db/pool';
 import { migrar } from '../db/migracao';
-import { consumirPedido, criarConexaoRedis } from '../fila/fila';
+import {
+  consumirPedido,
+  criarConexaoRedis,
+  extrairContextoDaMensagem,
+  type MensagemPedido,
+} from '../fila/fila';
 import { log } from '../telemetria/log';
-import { TIPO_DE_CONTEUDO, coletar } from '../telemetria/metricas';
+import {
+  TIPO_DE_CONTEUDO,
+  coletar,
+  pedidosConfirmados,
+} from '../telemetria/metricas';
 import { decidirStatusDoPedido } from './conciliacao';
 
 const porta = Number(process.env.WORKER_PORT ?? process.env.PORT ?? 8081);
+const tracer = trace.getTracer('loja-pedidos');
 
 let rodando = true;
 
@@ -30,23 +41,48 @@ function iniciarServidorDeSaude(): http.Server {
   });
 
   servidor.listen(porta, () => {
-    log.info('worker ouvindo na porta ' + porta);
+    log.info('Worker listening on port ' + porta);
   });
 
   return servidor;
 }
 
-async function processarMensagem(mensagem: Record<string, unknown>): Promise<void> {
+async function processarMensagem(mensagem: MensagemPedido): Promise<void> {
   const pedidoId = Number(mensagem.pedido_id);
   const clienteId = String(mensagem.cliente_id);
   const valorTotal = Number(mensagem.valor_total);
+  const contextoPai = extrairContextoDaMensagem(mensagem);
 
-  log.info('mensagem do pedido ' + pedidoId + ' recebida da fila');
+  return context.with(contextoPai, async () =>
+    tracer.startActiveSpan(
+      'pedido.processar',
+      { attributes: { 'pedido.id': pedidoId } },
+      async (span) => {
+        try {
+          log.info('Order message received from queue', { pedido_id: pedidoId });
 
-  const status = await decidirStatusDoPedido(clienteId, valorTotal);
-  await atualizarStatusPedido(pedidoId, status);
+          const status = await decidirStatusDoPedido(clienteId, valorTotal, pedidoId);
+          await atualizarStatusPedido(pedidoId, status);
 
-  log.info('pedido ' + pedidoId + ' ficou ' + status);
+          if (status === 'confirmado') {
+            pedidosConfirmados.inc();
+          }
+
+          log.info('Order status updated to ' + status, { pedido_id: pedidoId });
+        } catch (erro) {
+          const excecao = erro instanceof Error ? erro : new Error(String(erro));
+          span.recordException(excecao);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: excecao.message });
+          log.error('Order processing failed: ' + excecao.message, {
+            pedido_id: pedidoId,
+          });
+          throw erro;
+        } finally {
+          span.end();
+        }
+      }
+    )
+  );
 }
 
 async function iniciar(): Promise<void> {
@@ -68,7 +104,7 @@ async function iniciar(): Promise<void> {
   process.on('SIGINT', encerrar);
   process.on('SIGTERM', encerrar);
 
-  log.info('worker consumindo a fila de pedidos');
+  log.info('Worker consuming the order queue');
 
   while (rodando) {
     try {
@@ -78,13 +114,13 @@ async function iniciar(): Promise<void> {
         await processarMensagem(mensagem);
       }
     } catch (erro) {
-      log.error('erro ao ler a fila: ' + (erro as Error).message);
+      log.error('Queue processing failed: ' + (erro as Error).message);
       await new Promise((resolver) => setTimeout(resolver, 1000));
     }
   }
 }
 
 iniciar().catch((erro) => {
-  log.error('worker nao conseguiu iniciar: ' + erro.message);
+  log.error('Worker failed to start: ' + erro.message);
   process.exit(1);
 });
