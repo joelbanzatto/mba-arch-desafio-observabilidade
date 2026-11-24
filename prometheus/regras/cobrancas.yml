@@ -1,0 +1,16 @@
+groups:
+  - name: cobrancas
+    rules:
+      - alert: FalhaEmCobrancas
+        expr: |
+          (
+            sum(rate(cobrancas_processadas_total{resultado="falha"}[2m]))
+            /
+            clamp_min(sum(rate(cobrancas_processadas_total[2m])), 0.001)
+          ) > 0.03
+        for: 45s
+        labels:
+          severity: warning
+        annotations:
+          summary: Charge failure rate is burning the error budget
+          description: More than 3% of charge attempts have failed for two minutes.
