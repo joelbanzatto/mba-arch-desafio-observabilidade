@@ -1,34 +1,114 @@
 {
   "uid": "pedidos",
-  "title": "Pedidos",
-  "description": "Painel inicial do desafio. Acrescente os seus paineis copiando o bloco de panels e trocando a query, o titulo e o gridPos.",
-  "tags": ["desafio", "observabilidade"],
+  "title": "Orders",
+  "description": "Operational view of charge failures, API latency, and approved charges.",
+  "tags": ["challenge", "observability"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "editable": true,
   "time": { "from": "now-30m", "to": "now" },
   "panels": [
     {
       "id": 1,
-      "type": "timeseries",
-      "title": "Quanto trafego a API esta recebendo? Requisicoes por segundo, por rota",
-      "description": "Taxa de requisicoes HTTP derivada do contador do histograma http_request_duration_seconds.",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "type": "stat",
+      "title": "Is the system failing? Charge failure rate",
+      "description": "The percentage of charge attempts that fail because of an unexpected payment error.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (route) (rate(http_request_duration_seconds_count[1m]))",
-          "legendFormat": "{{route}}",
+          "expr": "100 * sum(rate(cobrancas_processadas_total{resultado=\"falha\"}[5m])) / clamp_min(sum(rate(cobrancas_processadas_total[5m])), 0.001)",
+          "legendFormat": "failure rate",
           "range": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 3 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Is the system slow? API p95 latency",
+      "description": "The 95th percentile duration of API requests, excluding metrics scraping.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route!=\"/metrics\"}[5m])))",
+          "legendFormat": "p95 latency",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "decimals": 3,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Is money entering? Approved charges per second",
+      "description": "The rate of charge attempts approved by the payment gateway, used as the cash-in signal.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(cobrancas_processadas_total{resultado=\"aprovada\"}[5m]))",
+          "legendFormat": "approved charges",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
           "min": 0,
           "decimals": 2,
           "custom": {
@@ -44,7 +124,7 @@
       },
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "tooltip": { "mode": "single", "sort": "none" }
       }
     }
   ]
