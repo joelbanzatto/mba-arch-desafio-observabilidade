@@ -19,11 +19,21 @@ export function medirRequisicoes(
 
   resposta.on('finish', () => {
     encerrarMedicao({
-      route: requisicao.path,
+      route: rotaPadronizada(requisicao),
       method: requisicao.method,
       status: String(resposta.statusCode),
     });
   });
 
   proximo();
+}
+
+function rotaPadronizada(requisicao: Request): string {
+  const caminhoDaRota = requisicao.route?.path;
+
+  if (typeof caminhoDaRota !== 'string') {
+    return 'unmatched';
+  }
+
+  return requisicao.baseUrl + caminhoDaRota;
 }

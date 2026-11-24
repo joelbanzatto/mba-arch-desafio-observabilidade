@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type Redis from 'ioredis';
+import { SpanStatusCode, trace } from '@opentelemetry/api';
 import {
   buscarPedido,
   buscarProduto,
@@ -10,7 +11,13 @@ import {
 } from '../db/consultas';
 import { publicarPedido } from '../fila/fila';
 import { log } from '../telemetria/log';
-import { TIPO_DE_CONTEUDO, coletar } from '../telemetria/metricas';
+import {
+  TIPO_DE_CONTEUDO,
+  coletar,
+  pedidosCriados,
+} from '../telemetria/metricas';
+
+const tracer = trace.getTracer('loja-pedidos');
 
 export function criarRotas(redis: Redis): Router {
   const rotas = Router();
@@ -56,26 +63,49 @@ export function criarRotas(redis: Redis): Router {
       return;
     }
 
-    const produtos = await buscarProdutosPorIds(itens.map((item) => item.produto_id));
-    const precoPorProduto = new Map(produtos.map((produto) => [produto.id, produto.preco]));
+    return tracer.startActiveSpan('pedido.criar', async (span) => {
+      let pedidoId: number | undefined;
 
-    const faltando = itens.filter((item) => !precoPorProduto.has(item.produto_id));
-    if (faltando.length > 0) {
-      resposta.status(400).json({ erro: 'produto inexistente no pedido' });
-      return;
-    }
+      try {
+        const produtos = await buscarProdutosPorIds(itens.map((item) => item.produto_id));
+        const precoPorProduto = new Map(produtos.map((produto) => [produto.id, produto.preco]));
 
-    const pedido = await criarPedido(clienteId, itens, precoPorProduto);
+        const faltando = itens.filter((item) => !precoPorProduto.has(item.produto_id));
+        if (faltando.length > 0) {
+          resposta.status(400).json({ erro: 'produto inexistente no pedido' });
+          return;
+        }
 
-    await publicarPedido(redis, {
-      pedido_id: pedido.id,
-      cliente_id: clienteId,
-      valor_total: pedido.valor_total,
+        const pedido = await criarPedido(clienteId, itens, precoPorProduto);
+        pedidoId = pedido.id;
+        span.setAttributes({
+          'pedido.id': pedido.id,
+          'pedido.item_count': itens.length,
+          'pedido.valor_total': pedido.valor_total,
+        });
+        pedidosCriados.inc();
+
+        await publicarPedido(redis, {
+          pedido_id: pedido.id,
+          cliente_id: clienteId,
+          valor_total: pedido.valor_total,
+        });
+
+        log.info('Order created and published for processing', { pedido_id: pedido.id });
+
+        resposta.status(202).json({ pedido_id: pedido.id, status: 'pendente' });
+      } catch (erro) {
+        const excecao = erro instanceof Error ? erro : new Error(String(erro));
+        span.recordException(excecao);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: excecao.message });
+        log.error('Order creation failed: ' + excecao.message, {
+          ...(pedidoId === undefined ? {} : { pedido_id: pedidoId }),
+        });
+        throw erro;
+      } finally {
+        span.end();
+      }
     });
-
-    log.info('pedido ' + pedido.id + ' criado para ' + clienteId);
-
-    resposta.status(202).json({ pedido_id: pedido.id, status: 'pendente' });
   });
 
   rotas.get('/pedidos/:id', async (requisicao, resposta) => {
